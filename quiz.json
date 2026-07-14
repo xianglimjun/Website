@@ -1,27 +1,32 @@
 [
   {
-    "question": "Which HTTP status code represents a successful resource creation?",
-    "options": ["200 OK", "201 Created", "204 No Content", "400 Bad Request"],
-    "answer": "201 Created"
+    "type": "questions",
+    "question": "What is the number of open ports for the target of the first machine?",
+    "options": ["3", "2", "1", "4"],
+    "answer": "2"
   },
   {
+    "type": "short-questions",
     "question": "What is the default port for PostgreSQL databases?",
-    "options": ["3306", "6379", "5432", "27017"],
+    "options": [],
     "answer": "5432"
   },
   {
+    "type": "questions",
     "question": "Which environment variable does Google Cloud Run use to pass the port the app should listen on?",
     "options": ["PORT", "APP_PORT", "LISTEN_PORT", "RUN_PORT"],
     "answer": "PORT"
   },
   {
+    "type": "questions",
     "question": "What does CSS stand for?",
     "options": ["Creative Style Sheets", "Cascading Style Sheets", "Computer Style Sheets", "Colorful Style Sheets"],
     "answer": "Cascading Style Sheets"
   },
   {
+    "type": "short-questions",
     "question": "In a Dockerfile, which instruction specifies the command to run when the container starts?",
-    "options": ["RUN", "EXPOSE", "CMD", "COPY"],
+    "options": [],
     "answer": "CMD"
   }
 ]

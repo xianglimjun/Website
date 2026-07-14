@@ -2,7 +2,7 @@ import os
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, send_from_directory
 
 app = Flask(__name__)
 
@@ -36,9 +36,12 @@ def init_db():
                     id SERIAL PRIMARY KEY,
                     question TEXT NOT NULL,
                     options JSONB NOT NULL,
-                    answer TEXT NOT NULL
+                    answer TEXT NOT NULL,
+                    type TEXT NOT NULL DEFAULT 'questions'
                 );
             """)
+            # Ensure type column exists for existing tables
+            cur.execute("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'questions';")
             conn.commit()
 
             # Check if empty
@@ -57,6 +60,7 @@ def init_db():
                     # Fallback default hardcoded questions in case file is missing
                     quizzes = [
                         {
+                            "type": "questions",
                             "question": "Which HTTP status code represents a successful resource creation?",
                             "options": ["200 OK", "201 Created", "204 No Content", "400 Bad Request"],
                             "answer": "201 Created"
@@ -65,8 +69,8 @@ def init_db():
 
                 for quiz in quizzes:
                     cur.execute(
-                        "INSERT INTO quizzes (question, options, answer) VALUES (%s, %s, %s);",
-                        (quiz["question"], json.dumps(quiz["options"]), quiz["answer"])
+                        "INSERT INTO quizzes (question, options, answer, type) VALUES (%s, %s, %s, %s);",
+                        (quiz["question"], json.dumps(quiz["options"]), quiz["answer"], quiz.get("type", "questions"))
                     )
                 conn.commit()
                 print(f"Successfully seeded {len(quizzes)} questions.")
@@ -78,6 +82,19 @@ def init_db():
         if conn:
             conn.close()
 
+@app.route('/.well-known/acme-challenge/<filename>')
+def acme_challenge(filename):
+    """ACME challenge route for SSL certificate verification."""
+    # Try retrieving from environment variables
+    env_token = os.environ.get("ACME_CHALLENGE_TOKEN")
+    env_value = os.environ.get("ACME_CHALLENGE_VALUE")
+    if env_token and filename == env_token:
+        return env_value
+
+    # Fallback to local files under the .well-known/acme-challenge directory
+    well_known_dir = os.path.join(app.root_path, '.well-known', 'acme-challenge')
+    return send_from_directory(well_known_dir, filename)
+
 @app.route("/")
 def index():
     """Homepage route. Fetches quiz questions and renders them."""
@@ -87,14 +104,15 @@ def index():
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, question, options, answer FROM quizzes ORDER BY id LIMIT 5;")
+            cur.execute("SELECT id, question, options, answer, type FROM quizzes ORDER BY id LIMIT 5;")
             rows = cur.fetchall()
             for row in rows:
                 quizzes.append({
                     "id": row["id"],
                     "question": row["question"],
                     "options": row["options"],
-                    "answer": row["answer"]
+                    "answer": row["answer"],
+                    "type": row.get("type", "questions")
                 })
     except Exception as e:
         error_message = f"Failed to retrieve quiz questions: {e}"
@@ -115,7 +133,8 @@ def index():
                             "id": i + 1,
                             "question": q["question"],
                             "options": q["options"],
-                            "answer": q["answer"]
+                            "answer": q["answer"],
+                            "type": q.get("type", "questions")
                         })
             except Exception as e:
                 print(f"Error loading local fallback: {e}")
@@ -131,8 +150,8 @@ def submit():
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, answer FROM quizzes;")
-            db_answers = {str(row["id"]): row["answer"] for row in cur.fetchall()}
+            cur.execute("SELECT id, answer, type FROM quizzes;")
+            db_answers = {str(row["id"]): {"answer": row["answer"], "type": row.get("type", "questions")} for row in cur.fetchall()}
     except Exception as e:
         print(f"Database lookup error during submit: {e}")
         # Fallback dictionary matching local index fallback ids
@@ -142,16 +161,23 @@ def submit():
             with open(quiz_file_path, "r", encoding="utf-8") as f:
                 local_quizzes = json.load(f)
                 for i, q in enumerate(local_quizzes):
-                    db_answers[str(i + 1)] = q["answer"]
+                    db_answers[str(i + 1)] = {"answer": q["answer"], "type": q.get("type", "questions")}
 
     # Calculate in-memory score instantly
     for field_name, user_answer in request.form.items():
         if field_name.startswith("q_"):
             quiz_id = field_name.split("_")[1]
-            correct_answer = db_answers.get(quiz_id)
-            if correct_answer and user_answer == correct_answer:
-                score += 1
-            total += 1
+            correct_info = db_answers.get(quiz_id)
+            if correct_info:
+                correct_answer = correct_info["answer"]
+                q_type = correct_info["type"]
+                if q_type == "short-questions":
+                    if user_answer.strip() == correct_answer.strip():
+                        score += 1
+                else:
+                    if user_answer == correct_answer:
+                        score += 1
+                total += 1
 
     # In case total is 0 (e.g. no questions answered), default total to 5
     if total == 0:
