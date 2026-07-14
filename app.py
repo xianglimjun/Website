@@ -29,83 +29,20 @@ def get_db_connection():
     )
 
 def init_db():
-    """Initializes the database tables from schema.sql and seeds them if empty."""
+    """Initializes the database by running schema.sql (includes tables and seed data)."""
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Read and execute schema.sql
             schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
             if os.path.exists(schema_path):
                 print("Running schema.sql...")
                 with open(schema_path, "r", encoding="utf-8") as f:
                     cur.execute(f.read())
                 conn.commit()
+                print("Schema applied successfully.")
             else:
-                # Fallback to create table queries if schema file is missing
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS quizzes (
-                        id SERIAL PRIMARY KEY,
-                        question TEXT NOT NULL,
-                        options JSONB NOT NULL,
-                        answer TEXT NOT NULL,
-                        type TEXT NOT NULL DEFAULT 'questions'
-                    );
-                """)
-                cur.execute("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'questions';")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        id SERIAL PRIMARY KEY,
-                        username TEXT UNIQUE NOT NULL,
-                        password_hash TEXT NOT NULL
-                    );
-                """)
-                conn.commit()
-
-            # Seed default admin user
-            cur.execute("SELECT COUNT(*) FROM users;")
-            user_count = cur.fetchone()[0]
-            if user_count == 0:
-                print("Seeding default admin user: potato man...")
-                hashed_pw = generate_password_hash("IL0v3P0TATOS!")
-                cur.execute(
-                    "INSERT INTO users (username, password_hash) VALUES (%s, %s);",
-                    ("potato man", hashed_pw)
-                )
-                conn.commit()
-
-            # Check if empty quizzes
-            cur.execute("SELECT COUNT(*) FROM quizzes;")
-            count = cur.fetchone()[0]
-
-            if count == 0:
-                print("Database is empty. Seeding from quiz.json...")
-                quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
-                
-                # Load questions from JSON
-                if os.path.exists(quiz_file_path):
-                    with open(quiz_file_path, "r", encoding="utf-8") as f:
-                        quizzes = json.load(f)
-                else:
-                    # Fallback default hardcoded questions in case file is missing
-                    quizzes = [
-                        {
-                            "type": "questions",
-                            "question": "Which HTTP status code represents a successful resource creation?",
-                            "options": ["200 OK", "201 Created", "204 No Content", "400 Bad Request"],
-                            "answer": "201 Created"
-                        }
-                    ]
-
-                for quiz in quizzes:
-                    cur.execute(
-                        "INSERT INTO quizzes (question, options, answer, type) VALUES (%s, %s, %s, %s);",
-                        (quiz["question"], json.dumps(quiz["options"]), quiz["answer"], quiz.get("type", "questions"))
-                    )
-                conn.commit()
-                print(f"Successfully seeded {len(quizzes)} questions.")
-            else:
-                print(f"Database already contains {count} questions.")
+                print("Warning: schema.sql not found. Database tables may not exist.")
     except Exception as e:
         print(f"Database initialization error: {e}")
     finally:
