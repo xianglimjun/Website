@@ -21,8 +21,13 @@ limiter = Limiter(
     storage_uri="memory://"
 )
 
-# Define your secret entryway string in your environment variables (e.g., "my-secret-door")
-ADMIN_ENTRY_KEY = os.environ.get("ADMIN_ENTRY_KEY", "D1g1t4lp0t4t0m4n1L0v3P0TAT0S")
+
+# Grab the key directly from Google Cloud Run environment variables
+ADMIN_ENTRY_KEY = os.environ.get("ADMIN_ENTRY_KEY")
+
+if not ADMIN_ENTRY_KEY:
+    # Fail immediately on startup if you forgot to set it up in Cloud Run
+    raise RuntimeError("CRITICAL: ADMIN_ENTRY_KEY environment variable is not set!")
 
 # Secure secret key generation on startup, fallback to static if configured in environment
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
