@@ -4,8 +4,25 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template, request, redirect, url_for, send_from_directory, session
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
+
+# Essential for Google Cloud Run + Load Balancer to see real visitor IPs
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
+# In-memory limiter (perfect since max-instances=1)
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://"
+)
+
+# Define your secret entryway string in your environment variables (e.g., "my-secret-door")
+ADMIN_ENTRY_KEY = os.environ.get("ADMIN_ENTRY_KEY", "D1g1t4lp0t4t0m4n1L0v3P0TAT0S")
 
 # Secure secret key generation on startup, fallback to static if configured in environment
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
@@ -176,24 +193,30 @@ def require_admin():
 
 
 @app.route("/admin/login", methods=["GET", "POST"])
+@limiter.limit("3 per minute", methods=["POST"])  # Low limit since it's just you
 def admin_login():
+    # 1. Look for the secret key in either the URL parameters (GET) or form data (POST)
+    provided_key = request.args.get("key") or request.form.get("entry_key")
+    
+    # 2. If the key is missing or wrong, return a 404 Not Found to blend in with background noise
+    if provided_key != ADMIN_ENTRY_KEY:
+        abort(404)
+
     error = None
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
-        conn = None
         user = None
+        
         try:
-            conn = get_db_connection()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM users WHERE username = %s;", (username,))
-                user = cur.fetchone()
+            with get_db_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM users WHERE username = %s;", (username,))
+                    user = cur.fetchone()
         except Exception as e:
             print(f"Error checking user in DB: {e}")
-        finally:
-            if conn:
-                conn.close()
 
+        # Validate credentials
         if user and check_password_hash(user["password_hash"], password):
             session["admin_logged_in"] = True
             session["username"] = user["username"]
@@ -201,7 +224,8 @@ def admin_login():
         else:
             error = "Invalid username or password."
 
-    return render_template("admin_login.html", error=error)
+    # 3. Pass 'entry_key' back to the template so it can embed it into subsequent form actions
+    return render_template("admin_login.html", error=error, entry_key=ADMIN_ENTRY_KEY)
 
 
 @app.route("/admin")
@@ -389,6 +413,13 @@ def admin_delete_question(question_id):
 
     return redirect(url_for("admin_edit_quiz", quiz_set_id=quiz_set_id))
 
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    """Returns a friendly message to your friends if they type passwords too fast."""
+    return render_template(
+        "admin_login.html", 
+        error="Too many login attempts. Please wait a minute before trying again."
+    ), 429
 
 @app.route("/admin/logout")
 def admin_logout():
