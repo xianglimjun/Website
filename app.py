@@ -2,9 +2,13 @@ import os
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from flask import Flask, render_template, request, redirect, url_for, send_from_directory
+from flask import Flask, render_template, request, redirect, url_for, send_from_directory, session
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+# Secure secret key generation on startup, fallback to static if configured in environment
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 
 # Load port from environment variable, defaulting to 8080
 PORT = int(os.environ.get("PORT", 8080))
@@ -25,26 +29,52 @@ def get_db_connection():
     )
 
 def init_db():
-    """Initializes the database table and seeds it from quiz.json if empty."""
+    """Initializes the database tables from schema.sql and seeds them if empty."""
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Create quizzes table if not exists
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS quizzes (
-                    id SERIAL PRIMARY KEY,
-                    question TEXT NOT NULL,
-                    options JSONB NOT NULL,
-                    answer TEXT NOT NULL,
-                    type TEXT NOT NULL DEFAULT 'questions'
-                );
-            """)
-            # Ensure type column exists for existing tables
-            cur.execute("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'questions';")
-            conn.commit()
+            # Read and execute schema.sql
+            schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+            if os.path.exists(schema_path):
+                print("Running schema.sql...")
+                with open(schema_path, "r", encoding="utf-8") as f:
+                    cur.execute(f.read())
+                conn.commit()
+            else:
+                # Fallback to create table queries if schema file is missing
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS quizzes (
+                        id SERIAL PRIMARY KEY,
+                        question TEXT NOT NULL,
+                        options JSONB NOT NULL,
+                        answer TEXT NOT NULL,
+                        type TEXT NOT NULL DEFAULT 'questions'
+                    );
+                """)
+                cur.execute("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'questions';")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        username TEXT UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL
+                    );
+                """)
+                conn.commit()
 
-            # Check if empty
+            # Seed default admin user
+            cur.execute("SELECT COUNT(*) FROM users;")
+            user_count = cur.fetchone()[0]
+            if user_count == 0:
+                print("Seeding default admin user: potato man...")
+                hashed_pw = generate_password_hash("IL0v3P0TATOS!")
+                cur.execute(
+                    "INSERT INTO users (username, password_hash) VALUES (%s, %s);",
+                    ("potato man", hashed_pw)
+                )
+                conn.commit()
+
+            # Check if empty quizzes
             cur.execute("SELECT COUNT(*) FROM quizzes;")
             count = cur.fetchone()[0]
 
@@ -184,6 +214,131 @@ def submit():
         total = len(db_answers) if db_answers else 5
 
     return render_template("results.html", score=score, total=total)
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+        
+        conn = None
+        user = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM users WHERE username = %s;", (username,))
+                user = cur.fetchone()
+        except Exception as e:
+            print(f"Error checking user in DB: {e}")
+        finally:
+            if conn:
+                conn.close()
+                
+        # Fallback for offline mode or database connection failure
+        if not user and username == "potato man":
+            user = {
+                "username": "potato man",
+                "password_hash": generate_password_hash("IL0v3P0TATOS!")
+            }
+
+        if user and check_password_hash(user["password_hash"], password):
+            session["admin_logged_in"] = True
+            session["username"] = user["username"]
+            return redirect(url_for("admin_dashboard"))
+        else:
+            error = "Invalid username or password."
+
+    return render_template("admin_login.html", error=error)
+
+@app.route("/admin")
+def admin_dashboard():
+    if not session.get("admin_logged_in"):
+        return redirect(url_for("admin_login"))
+
+    conn = None
+    quizzes = []
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, question, options, answer, type FROM quizzes ORDER BY id;")
+            quizzes = cur.fetchall()
+    except Exception as e:
+        print(f"Error fetching quizzes for dashboard: {e}")
+        # Fallback local quiz.json
+        quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
+        if os.path.exists(quiz_file_path):
+            with open(quiz_file_path, "r", encoding="utf-8") as f:
+                local_quizzes = json.load(f)
+                for i, q in enumerate(local_quizzes):
+                    quizzes.append({
+                        "id": i + 1,
+                        "question": q["question"],
+                        "options": q["options"],
+                        "answer": q["answer"],
+                        "type": q.get("type", "questions")
+                    })
+    finally:
+        if conn:
+            conn.close()
+
+    return render_template("admin_dashboard.html", quizzes=quizzes)
+
+@app.route("/admin/add", methods=["POST"])
+def admin_add_quiz():
+    if not session.get("admin_logged_in"):
+        return redirect(url_for("admin_login"))
+
+    question = request.form.get("question")
+    q_type = request.form.get("type", "questions")
+    answer = request.form.get("answer")
+    
+    # Options processing
+    if q_type == "questions":
+        options_raw = request.form.getlist("options[]")
+        # filter out empty values
+        options = [opt.strip() for opt in options_raw if opt.strip()]
+    else:
+        options = []
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO quizzes (question, options, answer, type) VALUES (%s, %s, %s, %s);",
+                (question, json.dumps(options), answer, q_type)
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"Error inserting new quiz into database: {e}")
+        # Fallback: append to local quiz.json if possible to keep in sync
+        quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
+        if os.path.exists(quiz_file_path):
+            try:
+                with open(quiz_file_path, "r+", encoding="utf-8") as f:
+                    data = json.load(f)
+                    data.append({
+                        "type": q_type,
+                        "question": question,
+                        "options": options,
+                        "answer": answer
+                    })
+                    f.seek(0)
+                    json.dump(data, f, indent=2)
+                    f.truncate()
+            except Exception as ex:
+                print(f"Failed to append to local fallback file: {ex}")
+    finally:
+        if conn:
+            conn.close()
+
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.clear()
+    return redirect(url_for("admin_login"))
 
 if __name__ == "__main__":
     # Remove it from lines 81-82 and place it safely here:
