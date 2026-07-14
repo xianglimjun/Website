@@ -47,9 +47,12 @@
             </div>
 
             <h1
-                class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-white to-slate-200 bg-clip-text text-transparent mb-6">
-                Your Quiz Results
+                class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-white to-slate-200 bg-clip-text text-transparent mb-2">
+                Your Results
             </h1>
+            {% if quiz_set_title %}
+            <p class="text-slate-400 text-sm mb-6">{{ quiz_set_title }}</p>
+            {% endif %}
 
             <!-- Score Display Circle -->
             <div
@@ -77,11 +80,19 @@
                 {% endif %}
             </div>
 
-            <!-- Retry button -->
-            <a href="/"
-                class="inline-flex items-center justify-center px-8 py-3.5 rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 hover:border-slate-600 text-slate-200 hover:text-white font-semibold transition-all duration-200 w-full sm:w-auto">
-                Try Again
-            </a>
+            <!-- Action buttons -->
+            <div class="flex flex-col sm:flex-row gap-3 justify-center">
+                {% if quiz_set_id %}
+                <a href="/quiz/{{ quiz_set_id }}"
+                    class="inline-flex items-center justify-center px-8 py-3.5 rounded-xl bg-indigo-600/10 border border-indigo-500/30 hover:bg-indigo-600/20 hover:border-indigo-500/60 text-indigo-400 hover:text-indigo-300 font-semibold transition-all duration-200">
+                    Try Again
+                </a>
+                {% endif %}
+                <a href="/"
+                    class="inline-flex items-center justify-center px-8 py-3.5 rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 hover:border-slate-600 text-slate-200 hover:text-white font-semibold transition-all duration-200">
+                    All Quizzes
+                </a>
+            </div>
         </div>
     </main>
 

@@ -52,105 +52,128 @@ def init_db():
 @app.route('/.well-known/acme-challenge/<filename>')
 def acme_challenge(filename):
     """ACME challenge route for SSL certificate verification."""
-    # Try retrieving from environment variables
     env_token = os.environ.get("ACME_CHALLENGE_TOKEN")
     env_value = os.environ.get("ACME_CHALLENGE_VALUE")
     if env_token and filename == env_token:
         return env_value
-
-    # Fallback to local files under the .well-known/acme-challenge directory
     well_known_dir = os.path.join(app.root_path, '.well-known', 'acme-challenge')
     return send_from_directory(well_known_dir, filename)
 
+
+# ─── Public Routes ────────────────────────────────────────────────────────────
+
 @app.route("/")
 def index():
-    """Homepage route. Fetches quiz questions and renders them."""
+    """Homepage: list all quiz sets."""
     conn = None
-    quizzes = []
+    quiz_sets = []
     error_message = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, question, options, answer, type FROM quizzes ORDER BY id LIMIT 5;")
-            rows = cur.fetchall()
-            for row in rows:
-                quizzes.append({
-                    "id": row["id"],
-                    "question": row["question"],
-                    "options": row["options"],
-                    "answer": row["answer"],
-                    "type": row.get("type", "questions")
-                })
+            cur.execute("""
+                SELECT qs.id, qs.title, qs.description,
+                       COUNT(q.id) AS question_count
+                FROM quiz_sets qs
+                LEFT JOIN questions q ON q.quiz_set_id = qs.id
+                GROUP BY qs.id
+                ORDER BY qs.id;
+            """)
+            quiz_sets = list(cur.fetchall())
     except Exception as e:
-        error_message = f"Failed to retrieve quiz questions: {e}"
+        error_message = f"Failed to retrieve quiz sets: {e}"
         print(error_message)
     finally:
         if conn:
             conn.close()
 
-    # Fallback to local quiz.json questions if database is unreachable or empty
-    if not quizzes:
-        quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
-        if os.path.exists(quiz_file_path):
-            try:
-                with open(quiz_file_path, "r", encoding="utf-8") as f:
-                    local_quizzes = json.load(f)
-                    for i, q in enumerate(local_quizzes[:5]):
-                        quizzes.append({
-                            "id": i + 1,
-                            "question": q["question"],
-                            "options": q["options"],
-                            "answer": q["answer"],
-                            "type": q.get("type", "questions")
-                        })
-            except Exception as e:
-                print(f"Error loading local fallback: {e}")
+    return render_template("index.html", quiz_sets=quiz_sets, error=error_message)
 
-    return render_template("index.html", quizzes=quizzes, error=error_message)
 
-@app.route("/submit", methods=["POST"])
-def submit():
-    """Submission route. Evaluates user answers in-memory and shows results."""
+@app.route("/quiz/<int:quiz_set_id>")
+def take_quiz(quiz_set_id):
+    """Quiz-taking page for a specific quiz set."""
     conn = None
-    score = 0
-    total = 0
+    quiz_set = None
+    questions_list = []
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, answer, type FROM quizzes;")
-            db_answers = {str(row["id"]): {"answer": row["answer"], "type": row.get("type", "questions")} for row in cur.fetchall()}
+            cur.execute("SELECT id, title, description FROM quiz_sets WHERE id = %s;", (quiz_set_id,))
+            quiz_set = cur.fetchone()
+            if not quiz_set:
+                return redirect(url_for("index"))
+            cur.execute(
+                "SELECT id, question, options, type FROM questions WHERE quiz_set_id = %s ORDER BY id;",
+                (quiz_set_id,)
+            )
+            questions_list = list(cur.fetchall())
     except Exception as e:
-        print(f"Database lookup error during submit: {e}")
-        # Fallback dictionary matching local index fallback ids
-        quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
-        db_answers = {}
-        if os.path.exists(quiz_file_path):
-            with open(quiz_file_path, "r", encoding="utf-8") as f:
-                local_quizzes = json.load(f)
-                for i, q in enumerate(local_quizzes):
-                    db_answers[str(i + 1)] = {"answer": q["answer"], "type": q.get("type", "questions")}
+        print(f"Error loading quiz {quiz_set_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
 
-    # Calculate in-memory score instantly
+    return render_template("quiz.html", quiz_set=quiz_set, questions=questions_list)
+
+
+@app.route("/quiz/<int:quiz_set_id>/submit", methods=["POST"])
+def submit_quiz(quiz_set_id):
+    """Grade submitted answers for a quiz set."""
+    conn = None
+    score = 0
+    total = 0
+    quiz_set_title = "Quiz"
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT title FROM quiz_sets WHERE id = %s;", (quiz_set_id,))
+            row = cur.fetchone()
+            if row:
+                quiz_set_title = row["title"]
+            cur.execute(
+                "SELECT id, answer, type FROM questions WHERE quiz_set_id = %s;",
+                (quiz_set_id,)
+            )
+            db_answers = {
+                str(r["id"]): {"answer": r["answer"], "type": r.get("type", "questions")}
+                for r in cur.fetchall()
+            }
+    except Exception as e:
+        print(f"Database error during submit: {e}")
+        db_answers = {}
+    finally:
+        if conn:
+            conn.close()
+
     for field_name, user_answer in request.form.items():
         if field_name.startswith("q_"):
-            quiz_id = field_name.split("_")[1]
-            correct_info = db_answers.get(quiz_id)
-            if correct_info:
-                correct_answer = correct_info["answer"]
-                q_type = correct_info["type"]
-                if q_type == "short-questions":
-                    if user_answer.strip() == correct_answer.strip():
+            q_id = field_name.split("_")[1]
+            info = db_answers.get(q_id)
+            if info:
+                correct = info["answer"]
+                if info["type"] == "short-questions":
+                    if user_answer.strip() == correct.strip():
                         score += 1
                 else:
-                    if user_answer == correct_answer:
+                    if user_answer == correct:
                         score += 1
                 total += 1
 
-    # In case total is 0 (e.g. no questions answered), default total to 5
     if total == 0:
-        total = len(db_answers) if db_answers else 5
+        total = len(db_answers) if db_answers else 1
 
-    return render_template("results.html", score=score, total=total)
+    return render_template("results.html", score=score, total=total, quiz_set_title=quiz_set_title, quiz_set_id=quiz_set_id)
+
+
+# ─── Admin Routes ─────────────────────────────────────────────────────────────
+
+def require_admin():
+    """Helper: redirect to login if not authenticated."""
+    if not session.get("admin_logged_in"):
+        return redirect(url_for("admin_login"))
+    return None
+
 
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
@@ -158,7 +181,6 @@ def admin_login():
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
-        
         conn = None
         user = None
         try:
@@ -171,13 +193,6 @@ def admin_login():
         finally:
             if conn:
                 conn.close()
-                
-        # Fallback for offline mode or database connection failure
-        if not user and username == "potato man":
-            user = {
-                "username": "potato man",
-                "password_hash": generate_password_hash("IL0v3P0TATOS!")
-            }
 
         if user and check_password_hash(user["password_hash"], password):
             session["admin_logged_in"] = True
@@ -188,53 +203,150 @@ def admin_login():
 
     return render_template("admin_login.html", error=error)
 
+
 @app.route("/admin")
 def admin_dashboard():
-    if not session.get("admin_logged_in"):
-        return redirect(url_for("admin_login"))
+    guard = require_admin()
+    if guard:
+        return guard
 
     conn = None
-    quizzes = []
+    quiz_sets = []
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, question, options, answer, type FROM quizzes ORDER BY id;")
-            quizzes = cur.fetchall()
+            cur.execute("""
+                SELECT qs.id, qs.title, qs.description,
+                       COUNT(q.id) AS question_count
+                FROM quiz_sets qs
+                LEFT JOIN questions q ON q.quiz_set_id = qs.id
+                GROUP BY qs.id
+                ORDER BY qs.id;
+            """)
+            quiz_sets = list(cur.fetchall())
     except Exception as e:
-        print(f"Error fetching quizzes for dashboard: {e}")
-        # Fallback local quiz.json
-        quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
-        if os.path.exists(quiz_file_path):
-            with open(quiz_file_path, "r", encoding="utf-8") as f:
-                local_quizzes = json.load(f)
-                for i, q in enumerate(local_quizzes):
-                    quizzes.append({
-                        "id": i + 1,
-                        "question": q["question"],
-                        "options": q["options"],
-                        "answer": q["answer"],
-                        "type": q.get("type", "questions")
-                    })
+        print(f"Error fetching quiz sets: {e}")
     finally:
         if conn:
             conn.close()
 
-    return render_template("admin_dashboard.html", quizzes=quizzes)
+    return render_template("admin_dashboard.html", quiz_sets=quiz_sets)
 
-@app.route("/admin/add", methods=["POST"])
-def admin_add_quiz():
-    if not session.get("admin_logged_in"):
-        return redirect(url_for("admin_login"))
 
-    question = request.form.get("question")
+@app.route("/admin/quiz/new", methods=["GET", "POST"])
+def admin_new_quiz():
+    guard = require_admin()
+    if guard:
+        return guard
+
+    if request.method == "POST":
+        title = request.form.get("title", "").strip()
+        description = request.form.get("description", "").strip()
+        if title:
+            conn = None
+            try:
+                conn = get_db_connection()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO quiz_sets (title, description) VALUES (%s, %s) RETURNING id;",
+                        (title, description)
+                    )
+                    new_id = cur.fetchone()[0]
+                    conn.commit()
+                return redirect(url_for("admin_edit_quiz", quiz_set_id=new_id))
+            except Exception as e:
+                print(f"Error creating quiz set: {e}")
+            finally:
+                if conn:
+                    conn.close()
+
+    return render_template("admin_quiz_edit.html", quiz_set=None, questions=[])
+
+
+@app.route("/admin/quiz/<int:quiz_set_id>/edit", methods=["GET", "POST"])
+def admin_edit_quiz(quiz_set_id):
+    guard = require_admin()
+    if guard:
+        return guard
+
+    conn = None
+    quiz_set = None
+    questions_list = []
+
+    if request.method == "POST":
+        title = request.form.get("title", "").strip()
+        description = request.form.get("description", "").strip()
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE quiz_sets SET title = %s, description = %s WHERE id = %s;",
+                    (title, description, quiz_set_id)
+                )
+                conn.commit()
+        except Exception as e:
+            print(f"Error updating quiz set: {e}")
+        finally:
+            if conn:
+                conn.close()
+            conn = None
+
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, title, description FROM quiz_sets WHERE id = %s;", (quiz_set_id,))
+            quiz_set = cur.fetchone()
+            cur.execute(
+                "SELECT id, question, options, answer, type FROM questions WHERE quiz_set_id = %s ORDER BY id;",
+                (quiz_set_id,)
+            )
+            questions_list = list(cur.fetchall())
+    except Exception as e:
+        print(f"Error loading quiz set for edit: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    if not quiz_set:
+        return redirect(url_for("admin_dashboard"))
+
+    return render_template("admin_quiz_edit.html", quiz_set=quiz_set, questions=questions_list)
+
+
+@app.route("/admin/quiz/<int:quiz_set_id>/delete", methods=["POST"])
+def admin_delete_quiz(quiz_set_id):
+    guard = require_admin()
+    if guard:
+        return guard
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM quiz_sets WHERE id = %s;", (quiz_set_id,))
+            conn.commit()
+    except Exception as e:
+        print(f"Error deleting quiz set: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/quiz/<int:quiz_set_id>/question/add", methods=["POST"])
+def admin_add_question(quiz_set_id):
+    guard = require_admin()
+    if guard:
+        return guard
+
+    question = request.form.get("question", "").strip()
     q_type = request.form.get("type", "questions")
-    answer = request.form.get("answer")
-    
-    # Options processing
+    answer = request.form.get("answer", "").strip()
+
     if q_type == "questions":
         options_raw = request.form.getlist("options[]")
-        # filter out empty values
-        options = [opt.strip() for opt in options_raw if opt.strip()]
+        options = [o.strip() for o in options_raw if o.strip()]
     else:
         options = []
 
@@ -243,45 +355,51 @@ def admin_add_quiz():
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO quizzes (question, options, answer, type) VALUES (%s, %s, %s, %s);",
-                (question, json.dumps(options), answer, q_type)
+                "INSERT INTO questions (quiz_set_id, question, options, answer, type) VALUES (%s, %s, %s, %s, %s);",
+                (quiz_set_id, question, json.dumps(options), answer, q_type)
             )
             conn.commit()
     except Exception as e:
-        print(f"Error inserting new quiz into database: {e}")
-        # Fallback: append to local quiz.json if possible to keep in sync
-        quiz_file_path = os.path.join(os.path.dirname(__file__), "quiz.json")
-        if os.path.exists(quiz_file_path):
-            try:
-                with open(quiz_file_path, "r+", encoding="utf-8") as f:
-                    data = json.load(f)
-                    data.append({
-                        "type": q_type,
-                        "question": question,
-                        "options": options,
-                        "answer": answer
-                    })
-                    f.seek(0)
-                    json.dump(data, f, indent=2)
-                    f.truncate()
-            except Exception as ex:
-                print(f"Failed to append to local fallback file: {ex}")
+        print(f"Error adding question: {e}")
     finally:
         if conn:
             conn.close()
 
-    return redirect(url_for("admin_dashboard"))
+    return redirect(url_for("admin_edit_quiz", quiz_set_id=quiz_set_id))
+
+
+@app.route("/admin/question/<int:question_id>/delete", methods=["POST"])
+def admin_delete_question(question_id):
+    guard = require_admin()
+    if guard:
+        return guard
+
+    quiz_set_id = request.form.get("quiz_set_id")
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM questions WHERE id = %s;", (question_id,))
+            conn.commit()
+    except Exception as e:
+        print(f"Error deleting question: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    return redirect(url_for("admin_edit_quiz", quiz_set_id=quiz_set_id))
+
 
 @app.route("/admin/logout")
 def admin_logout():
     session.clear()
     return redirect(url_for("admin_login"))
 
+
 if __name__ == "__main__":
-    # Remove it from lines 81-82 and place it safely here:
     try:
         init_db()
     except Exception as e:
         print(f"Warning: Database pre-initialization failed: {e}")
-        
+
     app.run(host="0.0.0.0", port=PORT)
